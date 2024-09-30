@@ -357,6 +357,7 @@ class CopyUtil(ScrapiBase):
         This performs a lookup based on Intent Display Name, retrieves the
         Destination Intent object, and then updates it appropriately.
         """
+        destination_intent_obj = None
 
         destination_intents = self.intents.list_intents(destination_agent)
         for intent in destination_intents:
@@ -444,7 +445,7 @@ class CopyUtil(ScrapiBase):
         for entity in resources_objects["entities"]:
             logging.info("Creating Entity %s...", entity.display_name)
             try:
-                self.entities.create_entity_type(destination_agent, entity)
+                self.entities.create_entity_type(agent_id=destination_agent, obj=entity)
                 resources_skip_list["entities"].append(entity.display_name)
                 logging.info(
                     "Entity %s created successfully.", entity.display_name

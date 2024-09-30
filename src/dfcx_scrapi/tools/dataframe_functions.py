@@ -1,6 +1,6 @@
 """Utility file for dataframe functions in support of Dialogflow CX."""
 
-# Copyright 2023 Google LLC
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,13 +18,11 @@ import json
 import logging
 import time
 from typing import Dict, List
-import google.auth
 import gspread
 import pandas as pd
 import numpy as np
 from tabulate import tabulate
 from gspread_dataframe import set_with_dataframe
-from oauth2client.service_account import ServiceAccountCredentials
 
 from google.cloud.dialogflowcx_v3beta1 import types
 
@@ -55,7 +53,6 @@ class DataframeFunctions(ScrapiBase):
         creds_path: str = None,
         creds_dict: dict = None,
         creds=None,
-        principal=False,
         scope=False,
     ):
         super().__init__(
@@ -70,28 +67,9 @@ class DataframeFunctions(ScrapiBase):
         if scope:
             scopes += scope
 
-        if creds:
-            self.sheets_client = gspread.authorize(creds)
+        self.creds.scopes.extend(scopes)
 
-        elif creds_path:
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                filename=creds_path, scopes=scopes
-            )
-            self.sheets_client = gspread.authorize(creds)
-
-        elif creds_dict:
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(
-                keyfile_dict=creds_dict, scopes=scopes
-            )
-            self.sheets_client = gspread.authorize(creds)
-
-        elif principal:
-            self.sheets_client = gspread.oauth()
-
-        else:
-            creds = google.auth.default(scopes=scopes)[0]
-            self.sheets_client = gspread.authorize(creds)
-
+        self.sheets_client = gspread.authorize(self.creds)
         self.entities = EntityTypes(creds=self.creds)
         self.intents = Intents(creds=self.creds)
         self.flows = Flows(creds=self.creds)
@@ -841,6 +819,7 @@ class DataframeFunctions(ScrapiBase):
           Dictionary with entity display names as keys and the
           new entity protobufs as values
         """
+        meta = None
 
         if "meta" in entities_df.columns:
             meta = (
@@ -901,6 +880,8 @@ class DataframeFunctions(ScrapiBase):
           Dictionary with entity display names as keys and the
           new entity protobufs as values
         """
+        meta = None
+
         if "meta" in entities_df.columns:
             meta = (
                 entities_df.copy()[["display_name", "meta"]]

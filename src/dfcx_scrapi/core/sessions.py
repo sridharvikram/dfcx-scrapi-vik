@@ -1,6 +1,6 @@
 """CX Session Resource functions."""
 
-# Copyright 2023 Google LLC
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,13 @@ from typing import Dict, List
 from google.cloud.dialogflowcx_v3beta1 import services
 from google.cloud.dialogflowcx_v3beta1 import types
 from google.protobuf.json_format import MessageToDict
+from proto.marshal.collections import maps
+from IPython.display import display, Markdown
 
 from dfcx_scrapi.core import scrapi_base
+from dfcx_scrapi.core import tools
+from dfcx_scrapi.core import playbooks
+
 
 # logging config
 logging.basicConfig(
@@ -30,6 +35,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+
 class Sessions(scrapi_base.ScrapiBase):
     """Core Class for CX Session Resource functions."""
 
@@ -37,16 +43,22 @@ class Sessions(scrapi_base.ScrapiBase):
         self,
         creds_path: str = None,
         creds_dict: Dict = None,
+        creds=None,
         scope=False,
         agent_id: str = None,
-        session_id: str = None
+        session_id: str = None,
+        tools_map: Dict[str, str] = None,
+        playbooks_map: Dict[str, str] = None
     ):
         super().__init__(
-            creds_path=creds_path, creds_dict=creds_dict, scope=scope
+            creds_path=creds_path, creds_dict=creds_dict,
+            creds=creds, scope=scope
         )
 
         self.session_id = session_id
         self.agent_id = agent_id
+        self.tools_map = tools_map
+        self.playbooks_map = playbooks_map
 
     @property
     def session_id(self):
@@ -60,21 +72,118 @@ class Sessions(scrapi_base.ScrapiBase):
         self._session_id = value
 
     @staticmethod
+    def printmd(string):
+        display(Markdown(string))
+
+    @staticmethod
     def _build_query_input(text, language_code):
         """Build out the query_input object for the Query Request.
 
         Args:
           text, the text to use for the Detect Intent request.
           language_code, the language code to use for Detect Intent request.
-          """
+        """
         text_input = types.session.TextInput(text=text)
         query_input = types.session.QueryInput(
-            text=text_input, language_code=language_code)
+            text=text_input, language_code=language_code
+        )
 
         return query_input
 
+    @staticmethod
+    def build_intent_query_input(intent_id: str, language_code: str):
+        """Build the query_input object for direct Intent request."""
+        intent_input = types.session.IntentInput(intent=intent_id)
+        query_input = types.session.QueryInput(
+            intent=intent_input, language_code=language_code
+        )
+
+        return query_input
+
+    @staticmethod
+    def get_tool_action(tool_use: types.example.ToolUse) -> str:
+        return tool_use.action
+
+    def get_tool_params(self, params: maps.MapComposite):
+        "Handle various types of param values from Tool input/outputs."
+        param_map = {}
+        if isinstance(params, maps.MapComposite):
+            param_map = self.recurse_proto_marshal_to_dict(params)
+
+        # Clean up resulting param map. This is because I/O params from Agent
+        # Builder proto will have a blank top level key, but the main value
+        # info is what is important for return to the user in this tool.
+        empty_top_key = param_map.get("", None)
+        if len(param_map.keys()) == 1 and empty_top_key:
+            param_map = param_map[""]
+
+        return param_map
+
+    def get_playbook_name(self, playbook_id: str):
+        agent_id = self.parse_agent_id(playbook_id)
+        if not self.playbooks_map:
+            playbook_client = playbooks.Playbooks(agent_id)
+            self.playbooks_map = playbook_client.get_playbooks_map(agent_id)
+
+        return self.playbooks_map[playbook_id]
+
+    def get_tool_name(self, tool_use: types.example.ToolUse) -> str:
+        agent_id = self.parse_agent_id(tool_use.tool)
+        if not self.tools_map:
+            tool_client = tools.Tools()
+            self.tools_map = tool_client.get_tools_map(agent_id)
+        return self.tools_map[tool_use.tool]
+
+    def collect_tool_responses(
+        self, res: types.session.QueryResult
+    ) -> List[Dict[str, str]]:
+        """Gather all the tool responses into a list of dicts."""
+        tool_responses = []
+        for action in res.generative_info.action_tracing_info.actions:
+            if action.tool_use:
+                tool_responses.append(
+                    {
+                        "tool_name": self.get_tool_name(action.tool_use),
+                        "tool_action": self.get_tool_action(action.tool_use),
+                        "input_params": self.get_tool_params(
+                            action.tool_use.input_action_parameters),
+                        "output_params": self.get_tool_params(
+                            action.tool_use.output_action_parameters),
+                    }
+                )
+
+        return tool_responses
+
+    def collect_playbook_responses(
+        self, res: types.session.QueryResult
+    ) -> List[Dict[str, str]]:
+        """Gather all the playbook responses into a list of dicts."""
+        playbook_responses = []
+        for action in res.generative_info.action_tracing_info.actions:
+            if action.playbook_invocation:
+                playbook_responses.append(
+                    {
+                        "playbook_name": self.get_playbook_name(
+                            action.playbook_invocation.playbook
+                        )
+                    }
+                )
+            else:
+                # If no playbook invocation was found
+                # return the current Playbook
+                playbook_responses.append(
+                    {
+                        "playbook_name": self.get_playbook_name(
+                            res.generative_info.current_playbooks[-1]
+                        )
+                    }
+                )
+
+        return playbook_responses
+
     def build_session_id(
-        self, agent_id:str = None, overwrite:bool = True) -> str:
+        self, agent_id: str = None, overwrite: bool = True
+    ) -> str:
         """Creates a valid UUID-4 Session ID to use with other methods.
 
         Args:
@@ -83,9 +192,11 @@ class Sessions(scrapi_base.ScrapiBase):
         """
 
         agent_parts = self._parse_resource_path("agent", agent_id)
-        session_id = f"projects/{agent_parts['project']}/"\
-            f"locations/{agent_parts['location']}/agents/"\
+        session_id = (
+            f"projects/{agent_parts['project']}/"
+            f"locations/{agent_parts['location']}/agents/"
             f"{agent_parts['agent']}/sessions/{uuid.uuid4()}"
+        )
 
         if overwrite:
             self.session_id = session_id
@@ -157,9 +268,7 @@ class Sessions(scrapi_base.ScrapiBase):
             print("=" * 20)
             print(f"Query text: {query_result.text}")
             if "intent" in query_result:
-                print(
-                    f"Triggered Intent: {query_result.intent.display_name}"
-                )
+                print(f"Triggered Intent: {query_result.intent.display_name}")
 
             if "intent_detection_confidence" in query_result:
                 print(
@@ -167,25 +276,20 @@ class Sessions(scrapi_base.ScrapiBase):
                         f{query_result.intent_detection_confidence}"
                 )
 
-            print(
-                f"Response Page: {query_result.current_page.display_name}"
-            )
+            print(f"Response Page: {query_result.current_page.display_name}")
 
             for param in query_result.parameters:
                 if param == "statusMessage":
-                    print(
-                        f"Status Message: {query_result.parameters[param]}"
-                    )
+                    print(f"Status Message: {query_result.parameters[param]}")
 
             if response_text:
                 concat_messages = " ".join(
                     [
                         " ".join(response_message.text.text)
                         for response_message in query_result.response_messages
-                            ]
-                        )
+                    ]
+                )
                 print(f"Response Text: {concat_messages}\n")
-
 
     def detect_intent(
         self,
@@ -194,7 +298,10 @@ class Sessions(scrapi_base.ScrapiBase):
         text,
         language_code="en",
         parameters=None,
-        populate_data_store_connection_signals=False):
+        end_user_metadata=None,
+        populate_data_store_connection_signals=False,
+        intent_id: str = None
+    ):
         """Returns the result of detect intent with texts as inputs.
 
         Using the same `session_id` between requests allows continuation
@@ -208,6 +315,8 @@ class Sessions(scrapi_base.ScrapiBase):
           text: the user utterance to run intent detection on
           parameters: (Optional) Dict of CX Session Parameters to set in the
             conversation. Typically this is set before a conversation starts.
+          end_user_metadata: (Optional) Dict of CX Session endUserMetadata to
+            set in the conversation.
           populate_data_store_connection_signals: If set to true and data
             stores are involved in serving the request then query result will
             be populated with data_store_connection_signals field which
@@ -225,13 +334,16 @@ class Sessions(scrapi_base.ScrapiBase):
         if not res:
             raise ValueError(
                 "Session ID must be provided in the following format: "
-                "`projects/<Project ID>/locations/<Location ID>/agents/"\
-                "<Agent ID>/sessions/<Session ID>`.\n\n"\
-                "Utilize `build_session_id` to create a new Session ID.")
+                "`projects/<Project ID>/locations/<Location ID>/agents/"
+                "<Agent ID>/sessions/<Session ID>`.\n\n"
+                "Utilize `build_session_id` to create a new Session ID."
+            )
 
-        logging.info(f"Starting Session ID {session_id}")
-
-        query_input = self._build_query_input(text, language_code)
+        if intent_id:
+            query_input = self.build_intent_query_input(
+                intent_id, language_code)
+        else:
+            query_input = self._build_query_input(text, language_code)
 
         request = types.session.DetectIntentRequest()
         request.session = session_id
@@ -242,10 +354,13 @@ class Sessions(scrapi_base.ScrapiBase):
         if parameters:
             query_param_mapping["parameters"] = parameters
 
+        if end_user_metadata:
+            query_param_mapping["end_user_metadata"] = end_user_metadata
+
         if populate_data_store_connection_signals:
-            query_param_mapping["populate_data_store_connection_signals"] = (
-                populate_data_store_connection_signals
-            )
+            query_param_mapping[
+                "populate_data_store_connection_signals"
+            ] = populate_data_store_connection_signals
 
         if query_param_mapping:
             query_params = types.session.QueryParameters(query_param_mapping)
@@ -297,12 +412,61 @@ class Sessions(scrapi_base.ScrapiBase):
         """Extract the answer/citation from a Vertex Conversation response."""
 
         session_id = self.build_session_id(self.agent_id)
-        res = MessageToDict(self.detect_intent( # pylint: disable=W0212
-            self.agent_id, session_id, user_query)._pb)
+        res = MessageToDict(
+            self.detect_intent(  # pylint: disable=W0212
+                self.agent_id, session_id, user_query
+            )._pb
+        )
 
         answer_text = res["responseMessages"][0]["text"]["text"][0]
-        answer_link = res["responseMessages"][1]["payload"][
-            "richContent"][0][0]["actionLink"] if len(
-                res["responseMessages"]) > 1 else ""
+        answer_link = (
+            res["responseMessages"][1]["payload"]["richContent"][0][0][
+                "actionLink"
+            ]
+            if len(res["responseMessages"]) > 1
+            else ""
+        )
 
         return f"{answer_text} ({answer_link})"
+
+    def parse_result(self, res):
+
+        tool_call_font = "<font color='dark red'>TOOL CALL:</font></b>"
+        tool_res_font = "<font color='yellow'>TOOL RESULT:</font></b>"
+        query_font = "<font color='green'><b> USER QUERY:</font></b>"
+        response_font = "<font color='green'><b>AGENT RESPONSE:</font></b>"
+
+        self.printmd(f"{query_font} {res.text}")
+
+        for action in res.generative_info.action_tracing_info.actions:
+
+            if "tool_use" in action:
+                tool_name = action.tool_use.action
+                input_params = {}
+                output_params = {}
+
+                input_param = action.tool_use.input_action_parameters
+                output_param = action.tool_use.output_action_parameters
+
+                if isinstance(input_param, maps.MapComposite):
+                    processed_input_params = self.recurse_proto_marshal_to_dict(
+                        input_param
+                    )
+                    input_keys = list(processed_input_params.keys())
+                    first_key = input_keys[0] if input_keys else None
+                    input_params = processed_input_params.get(first_key, {})
+
+                if isinstance(output_param, maps.MapComposite):
+                    processed_output_params = (
+                        self.recurse_proto_marshal_to_dict(output_param)
+                    )
+                    output_keys = list(processed_output_params.keys())
+                    first_key = output_keys[0] if output_keys else None
+
+                    output_params = processed_output_params.get(first_key, {})
+
+                self.printmd(f"{tool_call_font} {tool_name} -> {input_params}")
+                self.printmd(f"{tool_res_font} {output_params}")
+
+            elif "agent_utterance" in action:
+                self.printmd(f"{response_font} {action.agent_utterance.text}")
